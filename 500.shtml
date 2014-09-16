@@ -2,7 +2,7 @@
 <html lang='en-US'>
 <head>
 <meta charset='utf-8'/>
-<link rel='stylesheet' type='text/css' href='style.css'/>
+<link rel='stylesheet' type='text/css' href='/style.css'/>
 <title>Ross Gibb</title>
 </head>
 <body>
@@ -24,6 +24,7 @@
   <span class='buttons'>
     <span><a href='/' class='nav'>Home</a></span>
   </span>
+</div>
 </div>
 </div>
 </body>

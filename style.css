@@ -2,12 +2,10 @@ body {
   font-family: Courier, monospace;
   font-size: 100%;
   color: #fcf354;
-  background: #03a8a9;
-  
+  background: #03a8a9;  
   width: 100%;
   margin: 0;
   padding-bottom: 20px;
-  
 }
 
 .shells {
@@ -38,7 +36,8 @@ body {
   padding-right: 5px;
   padding-bottom: 5px;
   padding-left: 5px;
-  margin-top: 20px;
+  margin-top: 10px;
+  margin-bottom: 40px;
   font-weight: 700;
   font-size: 120%;
   box-shadow: 10px 10px 0px #000000;
@@ -46,21 +45,37 @@ body {
 
 .inner_shell {
   padding-left: 5px;
+  padding-right: 5px;
   border-top: 5px double #acaaac;
   border-right: 2px solid #acaaac;
   border-bottom: 2px solid #acaaac;
   border-left: 2px solid #acaaac;
 }
 
-p.command {
+p.status {
   color: #acaaac;
   margin-bottom: 0px;
+  margin-top: 0px;
+  font-size: 60%;
+}
+
+p.command {
+  color: #acaaac;
+  margin-top: 0px;
 }
 
 .name {
   font-size: 200%;
   margin-top: 0px;
-  margin-bottom: 10px;
+  margin-bottom: 0px;
+}
+
+.align_r {
+  text-align: right;
+}
+
+.align_l {
+  text-align: left;
 }
 
 .buttons {
@@ -69,7 +84,6 @@ p.command {
   margin-right: 50px;
   margin-bottom: 20px;
   margin-left: 20px;
-  text-align: right;
 }
 
 .buttons span:first-letter {
@@ -95,7 +109,7 @@ a:visited.nav {
   color: #ffffff;
 }
 
-a:visited {
+a, a:visited {
   color: #acaaac;
 }
 

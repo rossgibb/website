@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang='en-US'>
+<head>
+<meta charset='utf-8'/>
+<link rel='stylesheet' type='text/css' href='../style.css'/>
+<title>Ross Gibb - 2013 CSAW Final write-up &mdash; Silk Street</title>
+<link rel="icon" type="image/jpeg" href="/img/rg_avatar.jpg" />
+</head>
+<body>
+  <h1>2013 CSAW Final write-up &mdash; Silk Street</h1>
+  <p>The following is a solution writeup to the "Silk Street" problem from the 2013 CSAW Final.</p>
+  <p>This write-up is structured as a tutorial demonstrating how to begin analyzing the Silk Street binary,
+     how to identify the vulnerabilities, and goes through
+     various revisions and refinement of the exploit code to fix bugs until the exploit code works.
+     However, it is assumed you have working knowledge of
+     reverse engineering and IDA (free version is fine), linux, wireshark, and gdb. It also assumes you understand how
+     <a href="http://insecure.org/stf/smashstack.html">stack based buffer overflows</a>
+     can be exploited. The writeup goes into a decent amount of detail about format
+     string vulnerabilities, and demonstrates the use of one, as I have found other write-ups lacking thorough
+     explanations around the exploitation of format string vulnerabilities.</p>
+  <p>At time of writing, you can <a href='https://isisblogs.poly.edu/2013/12/02/csaw-ctf-finals-2013-vms/'>
+     download a VM image</a> that contains the CSAW 2013 Finals challenges running live, so you can solve them and get
+     the actual flag from a remote system. I highly recommend doing this, nothing is as satisfying as gaining remote code
+     execution on an actual remote system.</p>
+  <p>I have included the Silk Street binary here in case the VM image is no longer available. You can run and exploit the binary locally
+     if CSAW Final VM is not available.</p>
+  <div class='shells'>
+  <div class='outer_shell'>
+  <div class='inner_shell'>
+  <span class='header'><span>Problem description and binary</span></span>
+  <h3>Silk Street - by Jeff Crowell</h3>
+  <p>After silkroad got shut down, some competitors popped up. This clone isn't even running over TOR... can you pop a shell and read
+     the flag?</p>
+  <p><a href='silkstreet'>silkstreet</a></p>
+  <p>nc xxx.xxx.xxx.xxx 4444</p>
+  </div>
+  </div>
+  </div>
+  <p>From the problem description it sounds like this will be an exploitation challenge, so there's a good chance this will involve
+     some memory corruption and shellcode.</p>
+  <p>Using <span class='code'>file</span> on the binary tells us it is a 32-bit non-stripped ELF file. Now is a good time
+     to interact with program a little bit to see how it works, which means we just run it and see what happens.</p>
+  <img src="img/silkstreet_1.png"/>
+  <p>As you can see the program implements a black market, from which I bought some LSD using bitcoins.</p>
+  <p>It's also always a good idea to mess around with program inputs before your start reverse engineering, you never
+     know what will pop up. If we do this with <span class='code'>printf</span> format string parameters you will notice
+     some strange output.</p>
+  <img src="img/silkstreet_2.png"/>
+  <p>Above you can see <span class='code'>%d%d</span> being entered as an input command. The program echoes back an error
+     message, but previous to the message are some numbers being printed. Looks like we've found a format string vulnerability.
+  <p>Let's track down the format string vulnerability. We'll use IDA for this.</p>
+  <p>The format string vulnerability can be found in the main function (<span class='code'>VA 0x08048e0c</span>) at the
+     <span class='code'>printf</span> call at <span class='code'>VA 0x08048f9f</span></p>
+  <img src="img/silkstreet_3.png"/>
+  <p>The vulnerability comes about because the user input is passed directly to the <span class='code'>printf</span> function
+     and the user input acts as the format string to the <span class='code'>printf</span> function. In theory, a format string
+     vulnerability lets us read and write arbitrary memory. However in practice, format string vulnerabilities are not always
+     so flexible. In the case of this one, the buffer our input is read into (labeled as <span class='code'>input_buf_0x8</span>)
+     is safely limited to 8 characters, which could limit what we are able to do with the vulnerability.</p>
+  <p>The format string vulnerability could be enough in itself to achieve remote code execution, but often a format string
+     vulnerability itself is not enough. If we glance around the main function a little bit more we see a call to
+     <a class='code' href="http://linux.die.net/man/3/gets">gets</a> at <span class='code'>VA 0x08049044</span>.
+     Calls to <span class='code'>gets</span>
+     are extremely dangerous as they don't check the number of bytes read. The <span class='code'>gets</span> call here is
+     used to read our response when the program asks if we plan to do anything illegal with our silkstreet purchase. The
+     program expects us to send one character, but if we send a bunch we can overwrite the return address on the stack
+     and crash the program.</p>
+  <img src="img/silkstreet_4.png"/>
+  <p>It's a good idea to test our hypothesis by running the program locally, buying something, selecting to checkout
+     our purchase, and when it asks us if we plan to do anything illegal we will send it a large buffer and see if we
+     can get the program to crash.</p>
+  <img src="img/silkstreet_5.png"/>
+  <p>The above demonstrates the program crash. You will notice that the main function finishes without problem by
+     printing out the apology, but when the main function attempts to return to the operating system a segmentation
+     fault occurs because we overwrote the return address on the stack with nonsense.</p>
+  <p>This buffer overflow could potentially let us execute shellcode directly on the stack, but the stack has to be
+     executable. We can check if the stack is executable or not by running <span class='code'>readelf -l silkstreet</span>.</p>
+  <img src="img/silkstreet_6.png"/>
+  <p>Turns out it's not executable&mdash;as indicated by RW&mdash;so we are not going to be able to just write
+     shellcode on the stack and execute it. Since we can overwrite the return address we could return into glibc or
+     attempt to use ROP gadgets to execute arbitrary code. However, the silkstreet process we actually want to
+     exploit is running remotely, and we don't have a copy of the actual glibc library that the remote instance
+     of silkstreet is using. Without a an exact copy of the remote program's glibc library performing a return to
+     glibc attack or using ROP gadgets in that library is going to be challenging. Since we can read arbitrary
+     memory with our format string vulnerability perhaps we could map out memory and figure out a glibc/ROP attack,
+     but that still sounds pretty hard. Since we have only looked at the main function of silkstreet so far,
+     we should keep looking to determine if there are other points in the binary that can be used to our advantage.</p>
+  <p>While we look through the binary its a good opportunity to review what we have, and what we could potentially use,
+     so we know what to look for.</p>
+  <p>What we have:</p>
+  <ul><li>A format string vulnerability – good for reading memory, leaking memory addresses, and writing to memory</li>
+      <li>A buffer overflow vulnerability – we can write to stack memory and control program execution flow using this</li></ul>
+  <p>What we need:</p>
+  <ul><li>Some executable memory that we can write to – we could load shell code there to execute
+      <li>The memory address of executable memory where our shellcode is – this is where we would send program execution
+          using our buffer overflow</li></ul>
+  <p>Let's work on finding some executable memory we can write to. If we refer back to the <span class='code'>readelf</span>
+     output we can see that there are no sections of the program that are both executable and writable.
+     Our other option is to find heap memory the program allocates that is both writable and executable.</p>
+  <p>If we look at the function called <span class='code'>_Z9getVictimP4User</span> at <span class='code'>VA 0x08049249</span>
+     we see a call to <span class='code'>posix_memalign</span> at <span class='code'>VA 0x0804926e</span>. Looking up the
+     documentation on
+     <a href="http://www.gnu.org/software/libc/manual/html_node/Aligned-Memory-Blocks.html#index-posix_005fmemalign" class='code'>
+     posix_memalign</a> we learn that <span class='code'>posix_memalign</span> allocates memory
+     aligned to a multiple of a value chosen by the programmer. In the case of silkstreet, the memory allocated by
+     <span class='code'>posix_memalign</span> will be the size of the system's memory page size (notice the system's
+     page size is looked up using a call to <span class='code'>getpagesize</span> just before <span class='code'>posix_align</span>).
+     In this case the returned memory address from <span class='code'>posix_memalign</span> will be exactly one memory page in
+     size and the address of that memory will be aligned to a multiple of the page size. We aren't told what the remote
+     system's page size is, but the default size of a Linux system is 4Kb, more than enough for useful shellcode. Also
+     of extreme importance is the call to <span class='code'>mprotect</span> at <span class='code'>VA 0x08049288</span>
+     where it sets the permissions to this newly allocated memory to RWX, we have found executable memory that is also writable.</p>
+  <img src="img/silkstreet_7.png"/>
+  <p>Great, we have executable memory that we believe is large enough to put useful shellcode in. But can we write arbitrary
+     data to this memory?</p>
+  <p>It turns out we can. To determine this we first have to figure out the program flow to get the program to call the
+     <span class='code'>_Z9getVictimP4User</span> function. It should be easy to see that this function is called when the
+     user of the program decides to purchase an assassination. At checkout time if an assassination has been purchased the
+     program determines who the user desires to be assassinated. The memory allocation we noted above is used to hold any
+     “special instructions” the user needs to provide for the assassination.</p>
+  <p>Looking at the program location where the special instructions are read from the user we see a call to
+     <span class='code'>fgets</span> to read the input from the user. The size of data read is <span class='code'>0x2710</span>
+     bytes and there is no
+     additional processing on the data read in, so we can send whatever data we want to the executable memory, including
+     shellcode. Of equal importance, the memory is not freed at the end of the function so it will be available elsewhere.</p>
+  <p>Now we have executable memory that we can write anything we want to, and we have a buffer overflow to direct
+     program execution to this executable memory. Using these facts we can formulate an exploitation plan.</p>
+  <p>Plan:</p>
+  <ol><li>Purchase an assassination from silkstreet</li>
+      <li>When asked for 'special instructions' for the assassination provide shellcode
+      <li>When asked if we are going to do anything illegal with our purchase send enough data to overwrite the return
+          address from the main function directing execution to the shellcode.</li></ol>
+  <p>It's a good plan, but we are missing a critical piece, what memory address will the shellcode exist at? We need to know
+     this in order to overwrite the main function's return address with the address of where the shellcode exists. The
+     address of the memory allocated by <span class='code'>posix_memalign</span> will vary from execution to execution. Guessing
+     the memory address of the shellcode is not a very elegant solution and is likely not to work anyway. Our best bet is to
+     find a way to leak the memory address of the shellcode. We have a format string vulnerability that can be used to read
+     memory, maybe we can use this to leak the address of the allocated memory.</p>
+  <p>There are likely multiple ways to leak the memory address of the shellcode, but one way is to remember that the
+     memory was allocated using <span class='code'>posix_memalign</span> and aligned to a multiple of the system's page size.
+     If we think about how the memory allocator is likely to work in this scenario we can see a possible solution. Let's say
+     the last memory the memory allocator allocated was at address <span class='code'>0x03304500</span> and was
+     <span class='code'>0x100</span> bytes in size. The memory allocator will know that the next available memory is at address
+     <span class='code'>0x03304600</span>, the address immediately after the memory just allocated.
+     When the memory allocator gets the next request from silkstreet using the <span class='code'>posix_memalign</span> function
+     requesting to allocate 4Kb of memory at a memory address that is a multiple of 4Kb, the
+     memory allocator can't use the next available memory address of <span class='code'>0x03304600</span>. This is because that address
+     is not a multiple of 4K. What address will the memory allocator allocate to? Without looking at the source code of the memory
+     allocator it's hard to know for sure, but a good guess is that the memory allocator will allocate the memory at the next
+     available address that is a multiple of 4K. In this case that address will be at <span class='code'>0x03305000</span>
+     (recall 4Kb is equal to <span class='code'>0x1000</span>). It is important to remember that if this assumption holds,
+     then we don't have to leak the exact address of shellcode, we just have to leak a memory address that was allocated before
+     the memory for the shellcode was allocated. We will then assume the shellcode is at the next memory address that is a
+     multiple of 4Kb, and calculate that address.</p>
+  <p>So our goal is to leak the memory address of either the shellcode itself, or an address of any memory allocated before the
+     memory for our shellcode was allocated.</p>
+  <p>We plan to use the format string vulnerability so it's a good time to remember how to use format string vulnerabilities
+     to read arbitrary memory. This is very good tutorial on <a href="http://althing.cs.dartmouth.edu/local/formats-teso.html">
+     using format string vulnerabilities</a>. For our case we are going to utilize the <span class='code'>%n$</span>
+     construct to read arbitrary stack memory.</p>
+  <p>Recall that if we want to print out an integer as a hex value using <span class='code'>printf</span>
+     we would use the format string <span class='code'>'%x'</span>. When
+     <span class='code'>printf</span> is called it will read the format string of <span class='code'>'%x'</span> from the stack
+     and expect to find the value to print as the next argument on the stack. For example if we try and print out the
+     unsigned decimal value of 3735928559 using <span class='code'>printf('%x', 3735928559)</span> the stack should look like this.</p>
+<pre>
+Higher
+addresses      ^
+               |
+        ---------------
+       |      ...      |                 -------------
+        ---------------        -------> |     '%x'    |
+       |  3735928559   |      |          -------------
+        ---------------       |
+%esp-> | fmt str addr  | -----
+        ---------------
+       |      ...      |
+        ---------------
+       |      ...      |
+        ---------------
+               |
+Lower          v
+addresses
+</pre>
+  <p>When <span class='code'>printf</span> is called it will find the address of the format string as the first argument on the
+     stack. From the format string it will determine that a hexadecimal number should be printed out, and it will look for that
+     number as the second argument on the stack. The result will be <span class='code'>printf</span> printing out
+     <span class='code'>'deadbeef'</span>,  the hex value of <span class='code'>3735928559</span>.
+  <p>The <span class='code'>printf</span> function takes a variable number of arguments that are normally in order on the stack.
+     There is a feature of the format string that allows the arguments to be retrieved in arbitrary order using the
+     <span class='code'>%n$</span> notation. For example if we specify the format string as <span class='code'>%3$x</span> it
+     indicates we want to read and print the third argument passed to <span class='code'>printf</span>. If we only pass one
+     argument we will read values from the stack that we didn't put there. For example, using
+     <span class='code'>printf('%3$x', 3735928559)</span> the stack will look as follows.</p>
+<pre>
+Higher
+addresses      ^
+               |
+        ---------------
+       |      ...      |
+        ---------------
+       |      ...      |
+        ---------------
+       | ????????????? |  <- value here will be printed
+        ---------------
+       |      ...      |                 -------------
+        ---------------        -------> |   '%3$x'    |
+       |  3735928559   |      |          -------------
+        ---------------       |
+%esp-> | fmt str addr  | -----
+        ---------------
+       |      ...      |
+        ---------------
+       |      ...      |
+        ---------------
+               |
+Lower          v
+addresses
+</pre>
+  <p>The value printed by <span class='code'>printf</span> in this case will be whatever is on the stack 2 stack pushes up
+     from the one argument we did pass to <span class='code'>printf</span>. When you control the format string you can print
+     arbitrary stack memory addresses.</p>
+  <p>Going back to the weak <span class='code'>printf</span> statement in silkstreet, we need to take a close look at the stack of
+     the function in order to find a stack location that
+     contains an address of allocated heap memory. We can then use the <span class='code'>printf</span> function to leak this
+     data giving us an address on the heap.</p>
+  <p>To do this we basically map out the stack looking for a stack address that contains a heap allocated address. It is relatively
+     easy to see what data is being put on the stack using IDA. At <span class='code'>VA 0x08048f04</span> we have a call to
+     <span class='code'>_Znaj</span>, some googling tells us this is a mangled name for the new operator in C++, which would
+     be allocating heap memory. The memory address returned by <span class='code'>_Znaj</span> is placed on the stack immediately
+     after this call, and if it's on the stack we should have access to it using our <span class='code'>printf</span> vulnerability.</p>
+  <p>It's useful to diagram the stack to see what we need to try and print. This stack diagram is when program execution
+     is at the weak <span class='code'>printf</span>
+     function at <span class='code'>VA 0x08048f9f</span>.
+<pre>
+Higher
+addresses      ^
+               |
+        ---------------
+0x5c   |      ...      |
+        ---------------
+0x58   | XXXXXXXXXXXXX | <- mem. addr. from __Znaj
+        ---------------
+0x54   |      ...      |
+        ---------------
+ .             .
+ .             .
+ .             .
+        ---------------
+0x10   |      ...      |
+        ---------------
+0xc    |      ...      |
+        ---------------
+0x8    |      ...      |                 -------------
+        ---------------        -------> | 'our input' |
+0x4    |      ...      |      |          -------------
+        ---------------       |
+%esp-> | fmt str addr  | -----
+        ---------------
+-0x4   |      ...      |
+        ---------------
+-0x8   |      ...      |
+        ---------------
+               |
+Lower          v
+addresses
+</pre>
+  <p>Using the stack diagram we can calculate what the value of the <span class='code'>printf</span> format string should be.
+     The value of n will be the positive offset from <span class='code'>%esp</span> that we want to print divided by 4 to count
+     the number stack positions up we need <span class='code'>printf</span> to look. For our stack it will be
+     <span class='code'>0x58 / 0x4 = 0x16 = 22</span>. Therefore, our format string should be <span class='code'>'%22$x'</span>.</p>
+  <p>We can give this a shot to determine if what is printed out is a reasonable stack address.</p>
+  <img src="img/silkstreet_8.png"/>
+  <p>The value <span class='code'>0x931a008</span> could be a stack address, but we can do some more testing to be sure.</p>
+  <p>Recall that our hypothesis is that the memory address of where the purchased assassination's special instructions is stored will
+     be the next higher memory address at a 4K boundary than a previously allocated memory address. In the example above the
+     allocated heap memory address is <span class='code'>0x931a008</span>, so we expect the 'special instructions' memory to be allocated
+     at <span class='code'>0x931b000</span>, which is the next higher memory address divisible by 4Kb (recall
+     <span class='code'>4Kb = 4 x 1024 = 4096 = 0x1000</span>).
+  <p>This is our working hypothesis, what we now need to do is test our hypothesis by beginning to write our exploit. To test
+     our hypothesis we will use a debugger.</p>
+  <p>To test our hypothesis we are going to put a breakpoint right after the allocation of the memory used to hold the
+     assassination's 'special instructions'. First, we must purchase an assassination, then leak the memory address of
+     the allocated heap memory using our format string vulnerability. Next, we will calculate the address by hand that we think the
+     'special instructions' memory will be allocated at, and finally, use the debugger to check if our
+     calculation provides the actual memory address of the 'special instructions'.</p>
+  <p>Using gdb, begin by placing a breakpoint at <span class='code'>0x08049279</span> which is after the call to
+     <span class='code'>posix_memalign</span>, the address returned by <span class='code'>posix_memalign</span> will be placed in
+     <span class='code'>%eax</span>.</p>
+  <img src="img/silkstreet_9.png"/>
+  <p>Purchase an assassination and then enter <span class='code'>'%22$x'</span> to trigger the format string vulnerability.</p>
+  <img src="img/silkstreet_10.png"/>
+  <p>The leaked address printed is <span class='code'>0x804c008</span>, so if do our calculation, the next memory address at a 4Kb
+     boundary will be <span class='code'>0x804d000</span>. This is where we are expecting the value of the 'special
+     instructions' memory to be. Now, select checkout and promise not to do anything illegal
+     with our purchases. When the breakpoint we previously placed is hit display the registers and see if the value of
+     <span class='code'>%eax</span> matches what we calculated above.</p>
+  <img src="img/silkstreet_11.png"/>
+  <p>Success! Looks like our reasoning was correct. We can use our format string vulnerability to leak a memory address,
+     using that memory address we can calculate the address of the executable memory that we are going to place our shellcode into.
+     Finally, we will use our buffer overflow to direct execution to our shellcode and we will have achieved remote code execution.</p>
+  <p>Here's our exploitation plan:</p>
+  <ol><li>Purchase an assassination</li>
+      <li>Use the format string vulnerability to leak a heap memory address. Using this memory address calculate the
+          location of our shellcode</li>
+      <li>Choose to checkout our purchase</li>
+      <li>When asked to agree not to do anything illegal with our purchase, enter 'y', followed by a null byte,
+          followed by enough data to fill up the stack to the return address, and then write the memory address of our shellcode, so
+          our shellcode becomes the return address of the function</li>
+      <li>As part of checkout we will be asked if there are any 'special instructions' for our assassination, here is where we will
+          supply our shellcode</li>
+      <li>We will have achieved remote code execution when we return from the main function to our shellcode</li></ol>
+  <p>Since we want a remote shell, shellcode that implements a reverse remote shell should do, we can simply use shell code
+     already written from <a href='http://shell-storm.org/shellcode'>shell-storm.org/shellcode</a>, this one <a
+     href='http://shell-storm.org/shellcode/files/shellcode-849.php'>implements a reverse shell</a> and should work fine.</p>
+  <p>We do need to interact with the program over the network, so we are going to test our exploit by running silksteet locally,
+     and communicating with it through a local socket, as if it were running remotely. We can do this by first creating a named pipe
+     and then have <span class='code'>netcat</span> send input to, and read output from, silkstreet using the named pipe.
+     We also want to enable core dumps so
+     that we can examine the programs memory if it crashes as we develop our exploit. Use the following commands to enable
+     core dumps, create the named pipe, and execute silkstreet using <span class='code'>netcat</span> and the named pipe.
+     The <span class='code'>stdbuf</span> command ensures that IO is not buffered.</p>
+<pre>
+$ ulimit -c unlimited
+$ mkfifo silky
+$ nc -l 127.0.0.1 4444 < silky | stdbuf -i0 -o0 -e0 ./silkstreet > silky
+</pre>
+  <p>After the above command is run you should be able to connect to 127.0.0.1 on port 4444 using <span class='code'>netcat</span>
+     and interact with the program as normal.</p>
+<pre>$ nc 127.0.0.1 4444</pre>
+  <p>The last calculation we need to make is how many bytes we need to send to overflow the stack and replace the return address.
+     Again, we will use a stack diagram to help us determine it.</p>
+<pre>
+Higher
+addresses      ^
+               |
+        ---------------
+0x4    |  return addr  |
+        ---------------
+%ebp-> |  stored %ebp  |
+        ---------------
+-0x4   |  stored %ebx  |
+        ---------------
+  .            .
+  .            .
+  .            .
+        ---------------
+-0x4c  |      ...      |
+        --------------- 
+-0x50  |      ...      |
+        --------------- 
+-0x54  |     buffer    | <--- buffer begins here
+        ---------------
+-0x58  |      ...      |
+        ---------------
+               |
+Lower          v
+addresses
+</pre>
+  <p>The offsets to the left are based on the offsets provided by IDA. It can be a little confusing when working with negative
+     offsets, but basically we need to remember the buffer actually starts at offset <span class='code'>-0x57</span>, so to fill
+     up offsets <span class='code'>-0x57</span> to <span class='code'>0x0</span> we need to send <span class='code'>0x58</span>
+     bytes. This overwrites up to the stored value of <span class='code'>%ebp</span>, we send another <span class='code'>0x4</span>
+     bytes to overwrite that value. Therefore, we first send a total of <span class='code'>0x5c</span> bytes to overwrite up to the
+     return address, then we can send the
+     address of out shell code to ensure our shell code get executed when we return from this function.</p>
+  <p>Using all the information we have gathered,
+     <a href="https://github.com/rossgibb/ctf/blob/master/2013_csaw_finals/silkstreet/exploit_1.py">
+     this is the exploit code we come up with</a>.</p>
+  <p>Now it's time to test our exploit on the silkstreet running on the local socket. It is important to remember to open up a
+     <span class='code'>netcat</span> instance listening on local port 31337. This is the port we configured the reverse-shell
+     shellcode to connect back to. Open the listening socket as follows:</p>
+  <pre>$ nc -k -l 31337</pre>
+  <p>Now we're ready to test our exploit.</p>
+  <img src="img/silkstreet_12.png"/>
+  <p>From the output of our exploit code it appears to have worked. We can check the window where we launched silkstreet
+     to make sure it is still running, which it should be if our reverse shell connected. Unfortunately, we can see that
+     it has crashed.</p>
+  <img src="img/silkstreet_13.png"/>
+  <p>Since we enabled core dumps we can load the core dump in gdb.</p>
+  <img src="img/silkstreet_14.png"/>
+  <p>Apparently the program crashed at <span class='code'>VA 0x08049341</span>, we now need to go back to IDA to see what
+     the program is doing at this point.</p>
+  <img src="img/silkstreet_15.png"/>
+  <p>The crash occurs at the second call to <span class='code'>mov eax,[eax]</span> marked in the disassembly above.
+     The <span class='code'>eax</span> register must contain an invalid memory address. Using gdb we can see what is in
+     <span class='code'>eax</span> at this point.</p>
+  <img src="img/silkstreet_16.png"/>
+  <p>Clearly <span class='code'>eax</span> contains part of our stack overflow data as the value <span class='code'>0x77</span>
+     was what we overwrote the stack with up to the return address. Some of the stack data we overwrote must have been
+     important. We need to go back to the binary and see if we can adjust our overflow to not crash the program.</p>
+  <p>From reverse engineering we find that the function <span class='code'>_ZN4UserC2Ev</span> at
+     <span class='code'>VA 0x08049418</span> is what is responsible for setting the memory that <span class='code'>eax</span>
+     is supposed to refer to when the crash occurs. We can see that at <span class='code'>VA 0x0804941e</span> the value
+     <span class='code'>0x0804a3d0</span> is placed in the memory address passed in as the first argument. The value
+     <span class='code'>0x0804a3d0</span> is actually the VA of the function <span class='code'>_ZN4User8orderHitEPKc</span>,
+     so this is what actually needs to be in <span class='code'>eax</span> when we observed the crash. Again from reverse
+     engineering we can see that the argument to <span class='code'>_ZN4UserC2Ev</span> is a memory address on the stack in
+     the main function at offset <span class='code'>-0x14</span>. We must preserve this value on the stack
+     for the program to properly reach our shell code.</p>
+  <p>At this point it becomes obvious we don't actually need to overwrite the return address of the main function, we could
+     simply overwrite the function pointer to <span class='code'>_ZN4User8orderHitEPKc</span> on the stack with the address
+     of our shellcode. However, we are going to stick to out plan and  continue to attempt to overwrite the return address
+     of the main function
+     using the buffer flow. Crafting an exploit that overwrites the function pointer to <span class='code'>_ZN4User8orderHitEPKc</span>
+     on the stack is left as an exercise to the reader.</p>
+  <p>Here's an updated stack diagram of the main function where we are exploiting the buffer overflow.</p>
+<pre>Higher
+addresses      ^
+               |
+        ---------------
+0x4    |  return addr  |
+        ---------------
+%ebp-> |  stored %ebp  |
+        ---------------
+-0x4   |  stored %ebx  |
+        ---------------
+  .            .
+  .            .
+  .            .
+        ---------------
+-0x14  |  0x0804a3d0   | <--- addr of _ZN4User8orderHitEPKc
+        ---------------
+  .            .
+  .            .
+  .            .
+        ---------------
+-0x4c  |      ...      |
+        --------------- 
+-0x50  |      ...      |
+        --------------- 
+-0x54  |     buffer    | <--- buffer begins here
+        ---------------
+-0x58  |      ...      |
+        ---------------
+               |
+Lower          v
+addresses</pre>
+  <p>Fortunately, all we need to do is adjust our overflow slightly to preserve the value <span class='code'>0x0804a3d0</span>
+     on the stack. The updated
+     <a href="https://github.com/rossgibb/ctf/blob/master/2013_csaw_finals/silkstreet/exploit_2.py">
+     exploit code is here</a>.</p>
+  <p>Once we have made that small change we run the new exploit. The exploit again appears to work, but this time silkstreet
+     doesn't crash, and we try our listening netcat instance and we have a shell!</p>
+  <img src="img/silkstreet_17.png"/>
+  <p>Awesome! We are almost there, we have successfully exploited the program locally over a socket, now all we need to do is
+     exploit the actual remote service.</p>
+  <p>The next step it to cross your fingers and run the exploit against the actual CSAW Finals VM image.</p>
+  <p>In this case the exploit fails to trigger. It's not uncommon for an exploit not to work immediately when attempting to
+     exploit a remote service, even if it was working locally. The best way to debug this is to print out any and all output
+     send back from the remote service.</p>
+  <p>When we print out the output received from the server we notice that our commands are echoed back at us. This causes a
+     problem because when we go to read the leaked memory address more data came back than expected. We can easily fix this
+     and try again.</p>
+  <p>When we try again taking in to account out input being echoed back, we can read the correct address this time, but our
+     exploit again fails to trigger.</p>
+  <img src="img/silkstreet_18.png"/>
+  <p>In the above we can see that we are correctly interacting with the program, but our exploit is still not triggering,
+     evidenced by our listening socket not receiving a connection from the reverse shell.</p>
+  <p>Since our input is being echoed back at us it might be a good idea to check if what we are sending is what we are getting
+     sent back. It is a little difficult to see this in the terminal, but we can use wireshark to see the raw bytes.</p>
+  <img src="img/silkstreet_19.png"/>
+  <p>Viewing the TCP stream between our exploit script and the remote machine we can see even in the ASCII view that data
+     is coming back different than what we sent.</p>
+  <p>Looking at the hex output, it looks like certain bytes are being replaced with other bytes. This part can be tricky to solve.
+     Doing a systematic examination of what bytes are altered it starts to be obvious that only low bytes, bytes
+     below <span class='code'>0x20</span>, are being altered. We know from the ASCII table that low value bytes have special
+     meaning, so its a good guess that the low bytes we sending are getting altered or escaped by something
+     before they get to the program.</p>
+  <p>To get past problems like this Google and perseverance are usually what it takes. Staring at the wireshark output some
+     more and looking at exactly what is coming back we notice that when a <span class='code'>0x0</span> byte is sent we actually
+     get two bytes back in its place <span class='code'>0x5e40</span>, or <span class='code'>'^@'</span>. The trick is realizing
+     that <span class='code'>'^@'</span> is the ASCII escape sequence for <span class='code'>0x0</span>. Here's a table that
+     shows some of the ASCII escape sequences:</p>
+<pre>#define NUL             0x00    /* ^@ - Null */
+#define SOH             0x01    /* ^A - Start of Header */
+#define STX             0x02    /* ^B - Start of Text */
+#define ETX             0x03    /* ^C - End of Text */
+#define EOT             0x04    /* ^D - End of Transmission */
+#define ENQ             0x05    /* ^E - Enquiry */
+#define ACK             0x06    /* ^F - Acknowledgement */
+#define BEL             0x07    /* ^G - Bell */
+#define BS              0x08    /* ^H - Backspace */
+#define HT              0x09    /* ^I - Horizontal Tab */
+#define LF              0x0A    /* ^J - Line Feed */
+#define VT              0x0B    /* ^K - Vertical Tab */</pre>
+  <p>What appears to be happening is that something is interpreting the low bytes as ASCII control codes and escaping them.
+     How can we stop this?</p>
+  <p>Again, more Google, and specifically this <a href="https://forums.freebsd.org/viewtopic.php?f=35&t=44882">post</a> gives us
+     a hint it might have to do with the value <span class='code'>0x16</span>. It appears that we might be able to bypass the ASCII
+     escaping if we prepend each control code byte with the value <span class='code'>0x16</span>. Meaning if we want to send
+     <span class='code'>0x0</span> we need to actually send <span class='code'>0x16</span> then <span class='code'>0x0</span>.</p>
+  <p>The script needs to be modified to escape the ASCII control codes. One thing to keep in mind is we don't want to escape
+     <span class='code'>0xa</span> (newline) or <span class='code'>0xd</span> (carriage return) because we want these to be
+     interpreted as their control values.</p>
+  <p>Here is the <a href="https://github.com/rossgibb/ctf/blob/master/2013_csaw_finals/silkstreet/exploit_final.py">
+     updated exploit code</a> that escapes ASCII control codes we need to.</p>
+  <p>Once we make our script changes we try again. This time, success! We have a remote shell in our <span class='code'>netcat</span>
+     listening window and all we need to do is find the key and print it out.	</p>
+  <img src="img/silkstreet_20.png"/>
+</body>
+</html>
